@@ -39,7 +39,7 @@ APP_BOOT_MESSAGE = "アプリが起動されました。"
 # Retriever設定系
 # ==========================================
 TOP_K = 5
-RETRIEVER_WEIGHTS = [0.5, 0.5]
+RETRIEVER_WEIGHTS = [0.5, 0.5] # BM25RetrieverとChromaの比重
 DB_CACHE_DURATION_DAYS = 1  # データベースキャッシュの有効期間（日数）
 
 

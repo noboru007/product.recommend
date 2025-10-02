@@ -125,9 +125,6 @@ def initialize_retriever():
         for key in doc.metadata:
             doc.metadata[key] = adjust_string(doc.metadata[key])
 
-    # メモリ効率を改善：リスト内包表記を使用
-    docs_all = [doc.page_content for doc in docs]
-
     # OpenAI API キーの存在確認
     if not os.getenv("OPENAI_API_KEY"):
         logger.error("OPENAI_API_KEY環境変数が設定されていません")
@@ -135,21 +132,22 @@ def initialize_retriever():
     
     embeddings = OpenAIEmbeddings()
 
-    # すでに対象のデータベースが作成済みで、かつ作成から24時間以内の場合は読み込み、未作成またはデータベースが作成されてから24時間以上経った場合は新規作成する
-    logger.info(f"processing db: {ct.DB_PATH}")
     
-    if os.path.isdir(ct.DB_PATH):
+    # データベースの状態を確認
+    logger.info(f"processing db: {ct.DB_PATH}")
+    db_exists = os.path.isdir(ct.DB_PATH)
+    
+    # すでに対象のデータベースが作成済みで、かつ作成から24時間以内の場合は読み込み、未作成またはデータベースが作成されてから24時間以上経った場合は新規作成する
+    if db_exists:
         try:
             db_mtime = os.path.getmtime(ct.DB_PATH)
-            # utils.pyに実装したget_time関数を使い、"now-24h"の時刻を取得
-            threshold_time = utils.get_time(f"-{ct.DB_CACHE_DURATION_DAYS}d")  # 設定された日数前
+            threshold_time = utils.get_time(f"-{ct.DB_CACHE_DURATION_DAYS}d") # utils.pyに実装したget_time関数を使い、"now-24h"の時刻を取得
             if db_mtime > threshold_time:
                 logger.info("データベースは既存のものを使用。")
                 db = Chroma(persist_directory=ct.DB_PATH, embedding_function=embeddings)
             else:
                 logger.info("データベースが古いため、新規作成する。")
                 # 古いデータベースを削除してから新規作成
-                import shutil
                 shutil.rmtree(ct.DB_PATH)
                 db = Chroma.from_documents(docs, embedding=embeddings, persist_directory=ct.DB_PATH)
         except OSError as e:
@@ -159,13 +157,30 @@ def initialize_retriever():
         logger.info("データベースが存在しないため、新規作成する。")
         db = Chroma.from_documents(docs, embedding=embeddings, persist_directory=ct.DB_PATH)
     
-
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 
-
+    # BM25検索用のテキストデータ
+    docs_text = []
+    
+    # ハイブリッド検索の整合性を保つため、データベースからテキストデータを取得
+    logger.info("データベースからドキュメントを取得してBM25検索を構築")
+    try:
+        # データベース内の全ドキュメントを取得
+        # Chromaのget()は{'documents': [doc1, doc2, ...], 'metadatas': [...], 'ids': [...]}の形式
+        all_docs = db.get()
+        docs_text = all_docs.get('documents', []) if all_docs else []
+        
+        if not docs_text:
+            logger.error("データベースからドキュメントを取得できませんでした。ハイブリッド検索の整合性を保つため、処理を中断します。")
+            raise ValueError("データベースからドキュメントを取得できませんでした")
+        else:
+            logger.info(f"データベースから{len(docs_text)}件のドキュメントを取得しました")
+    except Exception as e:
+        logger.error(f"データベースからのドキュメント取得に失敗: {e}. ハイブリッド検索の整合性を保つため、処理を中断します。")
+        raise
 
     bm25_retriever = BM25Retriever.from_texts(
-        docs_all,
+        docs_text,
         preprocess_func=utils.preprocess_func,
         k=ct.TOP_K
     )
