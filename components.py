@@ -69,6 +69,12 @@ def display_product(result):
             価格：{product['price']}
     """)
 
+    # 【手順2】 在庫状況が「残りわずか」は黄色で、「なし」は赤字で以下を表示
+    if product['stock_status'] == ct.STOCK_STATUS_FEW:
+        st.warning(ct.REMAINING_STOCK_WARNING_MESSAGE)
+    elif product['stock_status'] == ct.STOCK_STATUS_NONE:
+        st.error(ct.SOLDOUT_ERROR_MESSAGE)
+
     # 「商品カテゴリ」と「メーカー」と「ユーザー評価」
     st.code(f"""
         商品カテゴリ：{product['category']}\n

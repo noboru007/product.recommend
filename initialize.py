@@ -6,16 +6,20 @@
 # ライブラリの読み込み
 ############################################################
 import os
+# Windows環境での文字エンコーディング問題を解決
+os.environ['PYTHONIOENCODING'] = 'utf-8'
 import logging
 from logging.handlers import TimedRotatingFileHandler
 from uuid import uuid4
 import sys
 import unicodedata
+import shutil
+from typing import Optional
 from dotenv import load_dotenv
 import streamlit as st
 from langchain_community.document_loaders.csv_loader import CSVLoader
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
 import utils
@@ -32,7 +36,7 @@ load_dotenv()
 # 関数定義
 ############################################################
 
-def initialize():
+def initialize() -> None:
     """
     画面読み込み時に実行する初期化処理
     """
@@ -40,7 +44,7 @@ def initialize():
     initialize_session_state()
     # ログ出力用にセッションIDを生成
     initialize_session_id()
-    # ログ出力の設定
+    # ログ出力の設定（セッションID生成後に実行）
     initialize_logger()
     # RAGのRetrieverを作成
     initialize_retriever()
@@ -57,13 +61,16 @@ def initialize_logger():
     if logger.hasHandlers():
         return
 
+    # セッションIDが存在しない場合のデフォルト値を設定
+    session_id = getattr(st.session_state, 'session_id', 'unknown')
+    
     log_handler = TimedRotatingFileHandler(
         os.path.join(ct.LOG_DIR_PATH, ct.LOG_FILE),
         when="D",
         encoding="utf8"
     )
     formatter = logging.Formatter(
-        f"[%(levelname)s] %(asctime)s line %(lineno)s, in %(funcName)s, session_id={st.session_state.session_id}: %(message)s"
+        f"[%(levelname)s] %(asctime)s line %(lineno)s, in %(funcName)s, session_id={session_id}: %(message)s"
     )
     log_handler.setFormatter(formatter)
     logger.setLevel(logging.INFO)
@@ -95,8 +102,22 @@ def initialize_retriever():
     if "retriever" in st.session_state:
         return
     
-    loader = CSVLoader(ct.RAG_SOURCE_PATH, encoding="utf-8")
-    docs = loader.load()
+    # ファイルパスの存在確認
+    if not os.path.exists(ct.RAG_SOURCE_PATH):
+        logger.error(f"データソースファイルが見つかりません: {ct.RAG_SOURCE_PATH}")
+        raise FileNotFoundError(f"データソースファイルが見つかりません: {ct.RAG_SOURCE_PATH}")
+    
+    try:
+        loader = CSVLoader(ct.RAG_SOURCE_PATH, encoding="utf-8-sig")
+        docs = loader.load()
+        
+        if not docs:
+            logger.warning("CSVファイルからドキュメントが読み込まれませんでした")
+            raise ValueError("CSVファイルが空または無効です")
+            
+    except Exception as e:
+        logger.error(f"CSVファイル読み込みエラー: {e}")
+        raise
 
     # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
     for doc in docs:
@@ -104,14 +125,44 @@ def initialize_retriever():
         for key in doc.metadata:
             doc.metadata[key] = adjust_string(doc.metadata[key])
 
-    docs_all = []
-    for doc in docs:
-        docs_all.append(doc.page_content)
+    # メモリ効率を改善：リスト内包表記を使用
+    docs_all = [doc.page_content for doc in docs]
 
+    # OpenAI API キーの存在確認
+    if not os.getenv("OPENAI_API_KEY"):
+        logger.error("OPENAI_API_KEY環境変数が設定されていません")
+        raise ValueError("OPENAI_API_KEY環境変数が設定されていません")
+    
     embeddings = OpenAIEmbeddings()
-    db = Chroma.from_documents(docs, embedding=embeddings)
+
+    # すでに対象のデータベースが作成済みで、かつ作成から24時間以内の場合は読み込み、未作成またはデータベースが作成されてから24時間以上経った場合は新規作成する
+    logger.info(f"processing db: {ct.DB_PATH}")
+    
+    if os.path.isdir(ct.DB_PATH):
+        try:
+            db_mtime = os.path.getmtime(ct.DB_PATH)
+            # utils.pyに実装したget_time関数を使い、"now-24h"の時刻を取得
+            threshold_time = utils.get_time(f"-{ct.DB_CACHE_DURATION_DAYS}d")  # 設定された日数前
+            if db_mtime > threshold_time:
+                logger.info("データベースは既存のものを使用。")
+                db = Chroma(persist_directory=ct.DB_PATH, embedding_function=embeddings)
+            else:
+                logger.info("データベースが古いため、新規作成する。")
+                # 古いデータベースを削除してから新規作成
+                import shutil
+                shutil.rmtree(ct.DB_PATH)
+                db = Chroma.from_documents(docs, embedding=embeddings, persist_directory=ct.DB_PATH)
+        except OSError as e:
+            logger.warning(f"データベースファイルアクセスエラー: {e}. 新規作成します。")
+            db = Chroma.from_documents(docs, embedding=embeddings, persist_directory=ct.DB_PATH)
+    else:
+        logger.info("データベースが存在しないため、新規作成する。")
+        db = Chroma.from_documents(docs, embedding=embeddings, persist_directory=ct.DB_PATH)
+    
 
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+
+
 
     bm25_retriever = BM25Retriever.from_texts(
         docs_all,
@@ -126,7 +177,7 @@ def initialize_retriever():
     st.session_state.retriever = ensemble_retriever
 
 
-def adjust_string(s):
+def adjust_string(s: str) -> str:
     """
     Windows環境でRAGが正常動作するよう調整
     
